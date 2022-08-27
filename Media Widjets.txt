@@ -1,0 +1,668 @@
+if ( ! control.id_base ) {
+				_.find( component.controlConstructors, function( Constructor, idBase ) {
+					if ( control instanceof Constructor ) {
+						control.id_base = idBase;
+						return true;
+					}
+					return false;
+				});
+				if ( ! control.id_base ) {
+					throw new Error( 'Missing id_base.' );
+				}
+			}
+
+			// Track attributes needed to renderPreview in it's own model.
+			control.previewTemplateProps = new Backbone.Model( control.mapModelToPreviewTemplateProps() );
+
+			// Re-render the preview when the attachment changes.
+			control.selectedAttachment = new wp.media.model.Attachment();
+			control.renderPreview = _.debounce( control.renderPreview );
+			control.listenTo( control.previewTemplateProps, 'change', control.renderPreview );
+
+			// Make sure a copy of the selected attachment is always fetched.
+			control.model.on( 'change:attachment_id', control.updateSelectedAttachment );
+			control.model.on( 'change:url', control.updateSelectedAttachment );
+			control.updateSelectedAttachment();
+
+			/*
+			 * Sync the widget instance model attributes onto the hidden inputs that widgets currently use to store the state.
+			 * In the future, when widgets are JS-driven, the underlying widget instance data should be exposed as a model
+			 * from the start, without having to sync with hidden fields. See <https://core.trac.wordpress.org/ticket/33507>.
+			 */
+			control.listenTo( control.model, 'change', control.syncModelToInputs );
+			control.listenTo( control.model, 'change', control.syncModelToPreviewProps );
+			control.listenTo( control.model, 'change', control.render );
+
+			// Update the title.
+			control.$el.on( 'input change', '.title', function updateTitle() {
+				control.model.set({
+					title: $( this ).val().trim()
+				});
+			});
+
+			// Update link_url attribute.
+			control.$el.on( 'input change', '.link', function updateLinkUrl() {
+				var linkUrl = $( this ).val().trim(), linkType = 'custom';
+				if ( control.selectedAttachment.get( 'linkUrl' ) === linkUrl || control.selectedAttachment.get( 'link' ) === linkUrl ) {
+					linkType = 'post';
+				} else if ( control.selectedAttachment.get( 'url' ) === linkUrl ) {
+					linkType = 'file';
+				}
+				control.model.set( {
+					link_url: linkUrl,
+					link_type: linkType
+				});
+
+				// Update display settings for the next time the user opens to select from the media library.
+				control.displaySettings.set( {
+					link: linkType,
+					linkUrl: linkUrl
+				});
+			});
+
+			/*
+			 * Copy current display settings from the widget model to serve as basis
+			 * of customized display settings for the current media frame session.
+			 * Changes to display settings will be synced into this model, and
+			 * when a new selection is made, the settings from this will be synced
+			 * into that AttachmentDisplay's model to persist the setting changes.
+			 */
+			control.displaySettings = new Backbone.Model( _.pick(
+				control.mapModelToMediaFrameProps(
+					_.extend( control.model.defaults(), control.model.toJSON() )
+				),
+				_.keys( wp.media.view.settings.defaultProps )
+			) );
+		},
+
+		/**
+		 * Update the selected attachment if necessary.
+		 *
+		 * @return {void}
+		 */
+		updateSelectedAttachment: function updateSelectedAttachment() {
+			var control = this, attachment;
+
+			if ( 0 === control.model.get( 'attachment_id' ) ) {
+				control.selectedAttachment.clear();
+				control.model.set( 'error', false );
+			} else if ( control.model.get( 'attachment_id' ) !== control.selectedAttachment.get( 'id' ) ) {
+				attachment = new wp.media.model.Attachment({
+					id: control.model.get( 'attachment_id' )
+				});
+				attachment.fetch()
+					.done( function done() {
+						control.model.set( 'error', false );
+						control.selectedAttachment.set( attachment.toJSON() );
+					})
+					.fail( function fail() {
+						control.model.set( 'error', 'missing_attachment' );
+					});
+			}
+		},
+
+		/**
+		 * Sync the model attributes to the hidden inputs, and update previewTemplateProps.
+		 *
+		 * @return {void}
+		 */
+		syncModelToPreviewProps: function syncModelToPreviewProps() {
+			var control = this;
+			control.previewTemplateProps.set( control.mapModelToPreviewTemplateProps() );
+		},
+
+		/**
+		 * Sync the model attributes to the hidden inputs, and update previewTemplateProps.
+		 *
+		 * @return {void}
+		 */
+		syncModelToInputs: function syncModelToInputs() {
+			var control = this;
+			control.syncContainer.find( '.media-widget-instance-property' ).each( function() {
+				var input = $( this ), value, propertyName;
+				propertyName = input.data( 'property' );
+				value = control.model.get( propertyName );
+				if ( _.isUndefined( value ) ) {
+					return;
+				}
+
+				if ( 'array' === control.model.schema[ propertyName ].type && _.isArray( value ) ) {
+					value = value.join( ',' );
+				} else if ( 'boolean' === control.model.schema[ propertyName ].type ) {
+					value = value ? '1' : ''; // Because in PHP, strval( true ) === '1' && strval( false ) === ''.
+				} else {
+					value = String( value );
+				}
+
+				if ( input.val() !== value ) {
+					input.val( value );
+					input.trigger( 'change' );
+				}
+			});
+		},
+
+		/**
+		 * Get template.
+		 *
+		 * @return {Function} Template.
+		 */
+		template: function template() {
+			var control = this;
+			if ( ! $( '#tmpl-widget-media-' + control.id_base + '-control' ).length ) {
+				throw new Error( 'Missing widget control template for ' + control.id_base );
+			}
+			return wp.template( 'widget-media-' + control.id_base + '-control' );
+		},
+
+		/**
+		 * Render template.
+		 *
+		 * @return {void}
+		 */
+		render: function render() {
+			var control = this, titleInput;
+
+			if ( ! control.templateRendered ) {
+				control.$el.html( control.template()( control.model.toJSON() ) );
+				control.renderPreview(); // Hereafter it will re-render when control.selectedAttachment changes.
+				control.templateRendered = true;
+			}
+
+			titleInput = control.$el.find( '.title' );
+			if ( ! titleInput.is( document.activeElement ) ) {
+				titleInput.val( control.model.get( 'title' ) );
+			}
+
+			control.$el.toggleClass( 'selected', control.isSelected() );
+		},
+
+		/**
+		 * Render media preview.
+		 *
+		 * @abstract
+		 * @return {void}
+		 */
+		renderPreview: function renderPreview() {
+			throw new Error( 'renderPreview must be implemented' );
+		},
+
+		/**
+		 * Whether a media item is selected.
+		 *
+		 * @return {boolean} Whether selected and no error.
+		 */
+		isSelected: function isSelected() {
+			var control = this;
+
+			if ( control.model.get( 'error' ) ) {
+				return false;
+			}
+
+			return Boolean( control.model.get( 'attachment_id' ) || control.model.get( 'url' ) );
+		},
+
+		/**
+		 * Handle click on link to Media Library to open modal, such as the link that appears when in the missing attachment error notice.
+		 *
+		 * @param {jQuery.Event} event - Event.
+		 * @return {void}
+		 */
+		handleMediaLibraryLinkClick: function handleMediaLibraryLinkClick( event ) {
+			var control = this;
+			event.preventDefault();
+			control.selectMedia();
+		},
+
+		/**
+		 * Open the media select frame to chose an item.
+		 *
+		 * @return {void}
+		 */
+		selectMedia: function selectMedia() {
+			var control = this, selection, mediaFrame, defaultSync, mediaFrameProps, selectionModels = [];
+
+			if ( control.isSelected() && 0 !== control.model.get( 'attachment_id' ) ) {
+				selectionModels.push( control.selectedAttachment );
+			}
+
+			selection = new wp.media.model.Selection( selectionModels, { multiple: false } );
+
+			mediaFrameProps = control.mapModelToMediaFrameProps( control.model.toJSON() );
+			if ( mediaFrameProps.size ) {
+				control.displaySettings.set( 'size', mediaFrameProps.size );
+			}
+
+			mediaFrame = new component.MediaFrameSelect({
+				title: control.l10n.add_media,
+				frame: 'post',
+				text: control.l10n.add_to_widget,
+				selection: selection,
+				mimeType: control.mime_type,
+				selectedDisplaySettings: control.displaySettings,
+				showDisplaySettings: control.showDisplaySettings,
+				metadata: mediaFrameProps,
+				state: control.isSelected() && 0 === control.model.get( 'attachment_id' ) ? 'embed' : 'insert',
+				invalidEmbedTypeError: control.l10n.unsupported_file_type
+			});
+			wp.media.frame = mediaFrame; // See wp.media().
+
+			// Handle selection of a media item.
+			mediaFrame.on( 'insert', function onInsert() {
+				var attachment = {}, state = mediaFrame.state();
+
+				// Update cached attachment object to avoid having to re-fetch. This also triggers re-rendering of preview.
+				if ( 'embed' === state.get( 'id' ) ) {
+					_.extend( attachment, { id: 0 }, state.props.toJSON() );
+				} else {
+					_.extend( attachment, state.get( 'selection' ).first().toJSON() );
+				}
+
+				control.selectedAttachment.set( attachment );
+				control.model.set( 'error', false );
+
+				// Update widget instance.
+				control.model.set( control.getModelPropsFromMediaFrame( mediaFrame ) );
+			});
+
+			// Disable syncing of attachment changes back to server (except for deletions). See <https://core.trac.wordpress.org/ticket/40403>.
+			defaultSync = wp.media.model.Attachment.prototype.sync;
+			wp.media.model.Attachment.prototype.sync = function( method ) {
+				if ( 'delete' === method ) {
+					return defaultSync.apply( this, arguments );
+				} else {
+					return $.Deferred().rejectWith( this ).promise();
+				}
+			};
+			mediaFrame.on( 'close', function onClose() {
+				wp.media.model.Attachment.prototype.sync = defaultSync;
+			});
+
+			mediaFrame.$el.addClass( 'media-widget' );
+			mediaFrame.open();
+
+			// Clear the selected attachment when it is deleted in the media select frame.
+			if ( selection ) {
+				selection.on( 'destroy', function onDestroy( attachment ) {
+					if ( control.model.get( 'attachment_id' ) === attachment.get( 'id' ) ) {
+						control.model.set({
+							attachment_id: 0,
+							url: ''
+						});
+					}
+				});
+			}
+
+			/*
+			 * Make sure focus is set inside of modal so that hitting Esc will close
+			 * the modal and not inadvertently cause the widget to collapse in the customizer.
+			 */
+			mediaFrame.$el.find( '.media-frame-menu .media-menu-item.active' ).focus();
+		},
+
+		/**
+		 * Get the instance props from the media selection frame.
+		 *
+		 * @param {wp.media.view.MediaFrame.Select} mediaFrame - Select frame.
+		 * @return {Object} Props.
+		 */
+		getModelPropsFromMediaFrame: function getModelPropsFromMediaFrame( mediaFrame ) {
+			var control = this, state, mediaFrameProps, modelProps;
+
+			state = mediaFrame.state();
+			if ( 'insert' === state.get( 'id' ) ) {
+				mediaFrameProps = state.get( 'selection' ).first().toJSON();
+				mediaFrameProps.postUrl = mediaFrameProps.link;
+
+				if ( control.showDisplaySettings ) {
+					_.extend(
+						mediaFrameProps,
+						mediaFrame.content.get( '.attachments-browser' ).sidebar.get( 'display' ).model.toJSON()
+					);
+				}
+				if ( mediaFrameProps.sizes && mediaFrameProps.size && mediaFrameProps.sizes[ mediaFrameProps.size ] ) {
+					mediaFrameProps.url = mediaFrameProps.sizes[ mediaFrameProps.size ].url;
+				}
+			} else if ( 'embed' === state.get( 'id' ) ) {
+				mediaFrameProps = _.extend(
+					state.props.toJSON(),
+					{ attachment_id: 0 }, // Because some media frames use `attachment_id` not `id`.
+					control.model.getEmbedResetProps()
+				);
+			} else {
+				throw new Error( 'Unexpected state: ' + state.get( 'id' ) );
+			}
+
+			if ( mediaFrameProps.id ) {
+				mediaFrameProps.attachment_id = mediaFrameProps.id;
+			}
+
+			modelProps = control.mapMediaToModelProps( mediaFrameProps );
+
+			// Clear the extension prop so sources will be reset for video and audio media.
+			_.each( wp.media.view.settings.embedExts, function( ext ) {
+				if ( ext in control.model.schema && modelProps.url !== modelProps[ ext ] ) {
+					modelProps[ ext ] = '';
+				}
+			});
+
+			return modelProps;
+		},
+
+		/**
+		 * Map media frame props to model props.
+		 *
+		 * @param {Object} mediaFrameProps - Media frame props.
+		 * @return {Object} Model props.
+		 */
+		mapMediaToModelProps: function mapMediaToModelProps( mediaFrameProps ) {
+			var control = this, mediaFramePropToModelPropMap = {}, modelProps = {}, extension;
+			_.each( control.model.schema, function( fieldSchema, modelProp ) {
+
+				// Ignore widget title attribute.
+				if ( 'title' === modelProp ) {
+					return;
+				}
+				mediaFramePropToModelPropMap[ fieldSchema.media_prop || modelProp ] = modelProp;
+			});
+
+			_.each( mediaFrameProps, function( value, mediaProp ) {
+				var propName = mediaFramePropToModelPropMap[ mediaProp ] || mediaProp;
+				if ( control.model.schema[ propName ] ) {
+					modelProps[ propName ] = value;
+				}
+			});
+
+			if ( 'custom' === mediaFrameProps.size ) {
+				modelProps.width = mediaFrameProps.customWidth;
+				modelProps.height = mediaFrameProps.customHeight;
+			}
+
+			if ( 'post' === mediaFrameProps.link ) {
+				modelProps.link_url = mediaFrameProps.postUrl || mediaFrameProps.linkUrl;
+			} else if ( 'file' === mediaFrameProps.link ) {
+				modelProps.link_url = mediaFrameProps.url;
+			}
+
+			// Because some media frames use `id` instead of `attachment_id`.
+			if ( ! mediaFrameProps.attachment_id && mediaFrameProps.id ) {
+				modelProps.attachment_id = mediaFrameProps.id;
+			}
+
+			if ( mediaFrameProps.url ) {
+				extension = mediaFrameProps.url.replace( /#.$/, '' ).replace( /\?.$/, '' ).split( '.' ).pop().toLowerCase();
+				if ( extension in control.model.schema ) {
+					modelProps[ extension ] = mediaFrameProps.url;
+				}
+			}
+
+			// Always omit the titles derived from mediaFrameProps.
+			return _.omit( modelProps, 'title' );
+		},
+
+		/**
+		 * Map model props to media frame props.
+		 *
+		 * @param {Object} modelProps - Model props.
+		 * @return {Object} Media frame props.
+		 */
+		mapModelToMediaFrameProps: function mapModelToMediaFrameProps( modelProps ) {
+			var control = this, mediaFrameProps = {};
+
+			_.each( modelProps, function( value, modelProp ) {
+				var fieldSchema = control.model.schema[ modelProp ] || {};
+				mediaFrameProps[ fieldSchema.media_prop || modelProp ] = value;
+			});
+
+			// Some media frames use attachment_id.
+			mediaFrameProps.attachment_id = mediaFrameProps.id;
+
+			if ( 'custom' === mediaFrameProps.size ) {
+				mediaFrameProps.customWidth = control.model.get( 'width' );
+				mediaFrameProps.customHeight = control.model.get( 'height' );
+			}
+
+			return mediaFrameProps;
+		},
+
+		/**
+		 * Map model props to previewTemplateProps.
+		 *
+		 * @return {Object} Preview Template Props.
+		 */
+		mapModelToPreviewTemplateProps: function mapModelToPreviewTemplateProps() {
+			var control = this, previewTemplateProps = {};
+			_.each( control.model.schema, function( value, prop ) {
+				if ( ! value.hasOwnProperty( 'should_preview_update' ) || value.should_preview_update ) {
+					previewTemplateProps[ prop ] = control.model.get( prop );
+				}
+			});
+
+			// Templates need to be aware of the error.
+			previewTemplateProps.error = control.model.get( 'error' );
+			return previewTemplateProps;
+		},
+
+		/**
+		 * Open the media frame to modify the selected item.
+		 *
+		 * @abstract
+		 * @return {void}
+		 */
+		editMedia: function editMedia() {
+			throw new Error( 'editMedia not implemented' );
+		}
+	});
+
+	/**
+	 * Media widget model.
+	 *
+	 * @class    wp.mediaWidgets.MediaWidgetModel
+	 * @augments Backbone.Model
+	 */
+	component.MediaWidgetModel = Backbone.Model.extend(/** @lends wp.mediaWidgets.MediaWidgetModel.prototype */{
+
+		/**
+		 * Id attribute.
+		 *
+		 * @type {string}
+		 */
+		idAttribute: 'widget_id',
+
+		/**
+		 * Instance schema.
+		 *
+		 * This adheres to JSON Schema and subclasses should have their schema
+		 * exported from PHP to JS such as is done in WP_Widget_Media_Image::enqueue_admin_scripts().
+		 *
+		 * @type {Object.<string, Object>}
+		 */
+		schema: {
+			title: {
+				type: 'string',
+				'default': ''
+			},
+			attachment_id: {
+				type: 'integer',
+				'default': 0
+			},
+			url: {
+				type: 'string',
+				'default': ''
+			}
+		},
+
+		/**
+		 * Get default attribute values.
+		 *
+		 * @return {Object} Mapping of property names to their default values.
+		 */
+		defaults: function() {
+			var defaults = {};
+			_.each( this.schema, function( fieldSchema, field ) {
+				defaults[ field ] = fieldSchema['default'];
+			});
+			return defaults;
+		},
+
+		/**
+		 * Set attribute value(s).
+		 *
+		 * This is a wrapped version of Backbone.Model#set() which allows us to
+		 * cast the attribute values from the hidden inputs' string values into
+		 * the appropriate data types (integers or booleans).
+		 *
+		 * @param {string|Object} key - Attribute name or attribute pairs.
+		 * @param {mixed|Object}  [val] - Attribute value or options object.
+		 * @param {Object}        [options] - Options when attribute name and value are passed separately.
+		 * @return {wp.mediaWidgets.MediaWidgetModel} This model.
+		 */
+		set: function set( key, val, options ) {
+			var model = this, attrs, opts, castedAttrs; // eslint-disable-line consistent-this
+			if ( null === key ) {
+				return model;
+			}
+			if ( 'object' === typeof key ) {
+				attrs = key;
+				opts = val;
+			} else {
+				attrs = {};
+				attrs[ key ] = val;
+				opts = options;
+			}
+
+			castedAttrs = {};
+			_.each( attrs, function( value, name ) {
+				var type;
+				if ( ! model.schema[ name ] ) {
+					castedAttrs[ name ] = value;
+					return;
+				}
+				type = model.schema[ name ].type;
+				if ( 'array' === type ) {
+					castedAttrs[ name ] = value;
+					if ( ! _.isArray( castedAttrs[ name ] ) ) {
+						castedAttrs[ name ] = castedAttrs[ name ].split( /,/ ); // Good enough for parsing an ID list.
+					}
+					if ( model.schema[ name ].items && 'integer' === model.schema[ name ].items.type ) {
+						castedAttrs[ name ] = _.filter(
+							_.map( castedAttrs[ name ], function( id ) {
+								return parseInt( id, 10 );
+							},
+							function( id ) {
+								return 'number' === typeof id;
+							}
+						) );
+					}
+				} else if ( 'integer' === type ) {
+					castedAttrs[ name ] = parseInt( value, 10 );
+				} else if ( 'boolean' === type ) {
+					castedAttrs[ name ] = ! ( ! value || '0' === value || 'false' === value );
+				} else {
+					castedAttrs[ name ] = value;
+				}
+			});
+
+			return Backbone.Model.prototype.set.call( this, castedAttrs, opts );
+		},
+
+		/**
+		 * Get props which are merged on top of the model when an embed is chosen (as opposed to an attachment).
+		 *
+		 * @return {Object} Reset/override props.
+		 */
+		getEmbedResetProps: function getEmbedResetProps() {
+			return {
+				id: 0
+			};
+		}
+	});
+
+	/**
+	 * Collection of all widget model instances.
+	 *
+	 * @memberOf wp.mediaWidgets
+	 *
+	 * @type {Backbone.Collection}
+	 */
+	component.modelCollection = new ( Backbone.Collection.extend( {
+		model: component.MediaWidgetModel
+	}) )();
+
+	/**
+	 * Mapping of widget ID to instances of MediaWidgetControl subclasses.
+	 *
+	 * @memberOf wp.mediaWidgets
+	 *
+	 * @type {Object.<string, wp.mediaWidgets.MediaWidgetControl>}
+	 */
+	component.widgetControls = {};
+
+	/**
+	 * Handle widget being added or initialized for the first time at the widget-added event.
+	 *
+	 * @memberOf wp.mediaWidgets
+	 *
+	 * @param {jQuery.Event} event - Event.
+	 * @param {jQuery}       widgetContainer - Widget container element.
+	 *
+	 * @return {void}
+	 */
+	component.handleWidgetAdded = function handleWidgetAdded( event, widgetContainer ) {
+		var fieldContainer, syncContainer, widgetForm, idBase, ControlConstructor, ModelConstructor, modelAttributes, widgetControl, widgetModel, widgetId, animatedCheckDelay = 50, renderWhenAnimationDone;
+		widgetForm = widgetContainer.find( '> .widget-inside > .form, > .widget-inside > form' ); // Note: '.form' appears in the customizer, whereas 'form' on the widgets admin screen.
+		idBase = widgetForm.find( '> .id_base' ).val();
+		widgetId = widgetForm.find( '> .widget-id' ).val();
+
+		// Prevent initializing already-added widgets.
+		if ( component.widgetControls[ widgetId ] ) {
+			return;
+		}
+
+		ControlConstructor = component.controlConstructors[ idBase ];
+		if ( ! ControlConstructor ) {
+			return;
+		}
+
+		ModelConstructor = component.modelConstructors[ idBase ] || component.MediaWidgetModel;
+
+		/*
+		 * Create a container element for the widget control (Backbone.View).
+		 * This is inserted into the DOM immediately before the .widget-content
+		 * element because the contents of this element are essentially "managed"
+		 * by PHP, where each widget update cause the entire element to be emptied
+		 * and replaced with the rendered output of WP_Widget::form() which is
+		 * sent back in Ajax request made to save/update the widget instance.
+		 * To prevent a "flash of replaced DOM elements and re-initialized JS
+		 * components", the JS template is rendered outside of the normal form
+		 * container.
+		 */
+		fieldContainer = $( '<div></div>' );
+		syncContainer = widgetContainer.find( '.widget-content:first' );
+		syncContainer.before( fieldContainer );
+
+		/*
+		 * Sync the widget instance model attributes onto the hidden inputs that widgets currently use to store the state.
+		 * In the future, when widgets are JS-driven, the underlying widget instance data should be exposed as a model
+		 * from the start, without having to sync with hidden fields. See <https://core.trac.wordpress.org/ticket/33507>.
+		 */
+		modelAttributes = {};
+		syncContainer.find( '.media-widget-instance-property' ).each( function() {
+			var input = $( this );
+			modelAttributes[ input.data( 'property' ) ] = input.val();
+		});
+		modelAttributes.widget_id = widgetId;
+
+		widgetModel = new ModelConstructor( modelAttributes );
+
+		widgetControl = new ControlConstructor({
+			el: fieldContainer,
+			syncContainer: syncContainer,
+			model: widgetModel
+		});
+
+		/*
+		 * Render the widget once the widget parent's container finishes animating,
+		 * as the widget-added event fires with a slideDown of the container.
+		 * This ensures that the container's dimensions are fixed so that ME.js
+		 * can initialize with the proper dimensions.
+		 */
